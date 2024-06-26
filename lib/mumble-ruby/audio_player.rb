@@ -9,8 +9,8 @@ module Mumble
       @packet_header = (type << 5).chr
       @conn = connection
       @pds = PacketDataStream.new
-      @queue = SizedQueue.new 100
-      @wav_format = WaveFile::Format.new :mono, :pcm_16, sample_rate
+      @queue = SizedQueue.new 500
+      @wav_format = WaveFile::Format.new :stereo, :pcm_16, sample_rate
       @type = type
       @bitrate = bitrate
       @sample_rate = sample_rate
@@ -61,7 +61,7 @@ module Mumble
         require 'ruby-portaudio'
         PortAudio.init
         unless playing?
-          @portaudio = PortAudio::Stream.open( :sample_rate => 48000, :frames => 8192, :input => { :device => PortAudio::Device.default_input, :channels => 1, :sample_format => :int16, :suggested_latency => 0.05 })
+          @portaudio = PortAudio::Stream.open( :sample_rate => sample_rate, :frames => 8192, :input => { :device => PortAudio::Device.default_input, :channels => 1, :sample_format => :int16, :suggested_latency => 0.05 })
           @audiobuffer = PortAudio::SampleBuffer.new( :format => :float32, :channels => 1, :frames => @framesize)
           @portaudio.start
           spawn_threads :portaudio
@@ -79,7 +79,7 @@ module Mumble
         kill_threads
         @encoder.reset
         @file.close unless @file.closed?
-        @portaudio.stop unless @portaudio.stopped?
+        #@portaudio.stop unless @portaudio.stopped?
         @playing = false
       end
     end
@@ -166,9 +166,15 @@ module Mumble
     end
 
     def bounded_produce
+      frametime = (@encoder.frame_size / COMPRESSED_SIZE).to_f / 1000  #milliseconds
+      frame_counter = 0
+      timestart = Time.now.to_f
       @file.each_buffer(@encoder.frame_size) do |buffer|
-        encode_sample buffer.samples.pack('s*')
+        encode_sample buffer.samples.flatten.pack('s*')
         consume
+        frame_counter +=1
+        wait = timestart - Time.now.to_f + frame_counter * frametime
+        sleep(wait) if wait > 0
       end
 
       stop
@@ -198,19 +204,22 @@ module Mumble
     end
 
     def consume
-      @seq ||= 0
-      @seq %= 1000000 # Keep sequence number reasonable for long runs
-      @pds.rewind
-      @seq += 1
-      @pds.put_int @seq
-      frame = @queue.pop
-      @pds.put_int frame.size
-      @pds.append_block frame
+      frame = @queue.pop  
+      if frame != nil   # prevent reading accidently from an empty queue
+        @seq ||= 0
+        @seq %= 1000000 # Keep sequence number reasonable for long runs
+        @pds.rewind
+        @seq += 1
+        @pds.put_int @seq
+        #frame = @queue.pop         
+        @pds.put_int frame.size
+        @pds.append_block frame
 
-      size = @pds.size
-      @pds.rewind
-      data = [@packet_header, @pds.get_block(size)].flatten.join
-      @conn.send_udp_packet data
+        size = @pds.size
+        @pds.rewind
+        data = [@packet_header, @pds.get_block(size)].flatten.join
+        @conn.send_udp_packet data
+      end
     end
   end
 end
